@@ -782,6 +782,27 @@ jobs:
           source $REJ_CHECKER
           check_rejects .
 
+      - name: Match pinned SUSFS hooks to SukiSU builtin boolean ABI
+        if: ${{ github.event.inputs.SUSFS_META == 'e5b4d2879836cfb8379010a8ebee76c519f5c834' }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path('kernel_workspace/kernel_platform')
+          sucompat = (root / 'KernelSU/kernel/feature/sucompat.c').read_text()
+          assert 'bool ksu_su_compat_enabled __read_mostly = true;' in sucompat
+          for name in ('exec.c', 'open.c', 'stat.c'):
+              path = root / 'common/fs' / name
+              source = path.read_text()
+              old_decl = 'extern struct static_key_true ksu_su_compat_enabled;'
+              old_check = 'static_branch_likely(&ksu_su_compat_enabled)'
+              assert source.count(old_decl) == 1, name
+              assert source.count(old_check) == 1, name
+              source = source.replace(old_decl, 'extern bool ksu_su_compat_enabled;')
+              source = source.replace(old_check, 'READ_ONCE(ksu_su_compat_enabled)')
+              path.write_text(source)
+              print('Matched boolean sucompat interface:', name)
+          PY
+
       - name: Revert Fake Patches
         if: ${{ github.event.inputs.SUSFS_META != '-1' }}
         run: |
