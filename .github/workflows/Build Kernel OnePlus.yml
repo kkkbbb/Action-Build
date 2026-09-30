@@ -798,6 +798,70 @@ jobs:
           source $REJ_CHECKER
           check_rejects .
 
+      - name: Match latest SUSFS hooks to SukiSU builtin ABI
+        if: ${{ github.event.inputs.FILE == 'oneplus_ace5_b' && github.event.inputs.SUSFS_META != '-1' }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('kernel_workspace/kernel_platform')
+          sucompat_path = root / 'KernelSU/kernel/feature/sucompat.c'
+          sucompat = sucompat_path.read_text()
+
+          bool_decl = 'bool ksu_su_compat_enabled __read_mostly = true;'
+          if bool_decl not in sucompat:
+              raise SystemExit('Unexpected SukiSU sucompat ABI: boolean feature flag not found')
+
+          old_decl = 'extern struct static_key_true ksu_su_compat_enabled;'
+          old_check = 'static_branch_likely(&ksu_su_compat_enabled)'
+          for name in ('exec.c', 'open.c', 'stat.c'):
+              path = root / 'common/fs' / name
+              source = path.read_text()
+              decl_count = source.count(old_decl)
+              check_count = source.count(old_check)
+              if decl_count != 1 or check_count != 1:
+                  raise SystemExit(
+                      f'Unexpected SUSFS hook layout in {name}: '
+                      f'declarations={decl_count}, checks={check_count}'
+                  )
+              source = source.replace(old_decl, 'extern bool ksu_su_compat_enabled;')
+              source = source.replace(old_check, 'READ_ONCE(ksu_su_compat_enabled)')
+              path.write_text(source)
+              print('Matched boolean sucompat interface:', name)
+
+          post_hook = 'int ksu_handle_post_execveat_sucompat('
+          if post_hook not in sucompat:
+              marker = '// sucompat: permitted process can execute \'su\' to gain root access.'
+              if marker not in sucompat:
+                  raise SystemExit('Unable to locate SukiSU sucompat insertion point')
+              compatibility = r'''
+          /*
+           * Current SukiSU completes sucompat setup before exec.  New SUSFS
+           * still calls the retired post-exec hook, so retain a no-op ABI
+           * bridge until its GKI patch drops that call.
+           */
+          int ksu_handle_post_execveat_sucompat(int *fd,
+                               struct filename **filename_ptr,
+                               void *argv, void *envp,
+                               int *flags, int *retval)
+          {
+              (void)fd;
+              (void)filename_ptr;
+              (void)argv;
+              (void)envp;
+              (void)flags;
+              (void)retval;
+              return 0;
+          }
+
+          '''
+              sucompat = sucompat.replace(marker, compatibility + marker, 1)
+              sucompat_path.write_text(sucompat)
+              print('Added retired SUSFS post-exec ABI bridge')
+          else:
+              print('SukiSU already provides the SUSFS post-exec hook')
+          PY
+
       - name: Revert and Postfix Fake Patches
         if: ${{ github.event.inputs.SUSFS_META != '-1' }}
         run: |
